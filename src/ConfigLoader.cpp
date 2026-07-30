@@ -19,19 +19,19 @@ void ConfigLoader::loadConfig()
     s_config.subdivisions = std::clamp(
         static_cast<int>(readIniFloat(iniPath, L"iSubdivisions", DEFAULT_SUBDIVISIONS)), 0, MAX_SUBDIVISIONS);
     s_config.smoothness = std::clamp(readIniFloat(iniPath, L"fSmoothness", DEFAULT_SMOOTHNESS), 0.0F, 1.0F);
-    s_config.overshoot = std::clamp(readIniFloat(iniPath, L"fOvershoot", DEFAULT_OVERSHOOT), 0.0F, 1.0F);
+    s_config.maxRise = std::clamp(readIniFloat(iniPath, L"fMaxRise", DEFAULT_MAX_RISE), 0.0F, MAX_RISE_CAP);
 
     // Log the effective values so user reports include them
     spdlog::info("Config Loaded: Subdivisions: {}", s_config.subdivisions);
     spdlog::info("Config Loaded: Smoothness: {}", s_config.smoothness);
-    spdlog::info("Config Loaded: Overshoot: {}", s_config.overshoot);
+    spdlog::info("Config Loaded: Max Rise: {}", s_config.maxRise);
 }
 
 auto ConfigLoader::getSubdivisions() -> int { return s_config.subdivisions; }
 
 auto ConfigLoader::getSmoothness() -> float { return s_config.smoothness; }
 
-auto ConfigLoader::getOvershoot() -> float { return s_config.overshoot; }
+auto ConfigLoader::getMaxRise() -> float { return s_config.maxRise; }
 
 auto ConfigLoader::readIniFloat(const std::filesystem::path& path,
                                 const wchar_t* key,

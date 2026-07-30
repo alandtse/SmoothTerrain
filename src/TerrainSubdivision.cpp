@@ -181,7 +181,7 @@ auto TerrainSubdivision::subdivide(RE::BSTriShape& shape,
     const float step = K_COARSE_STEP / static_cast<float>(sub);
 
     const float smoothness = ConfigLoader::getSmoothness();
-    const float overshoot = ConfigLoader::getOvershoot();
+    const float maxRise = ConfigLoader::getMaxRise();
 
     std::vector<LandVertex> fine(fineVerts);
     for (std::uint32_t j = 0; j < fineDim; ++j) {
@@ -218,7 +218,7 @@ auto TerrainSubdivision::subdivide(RE::BSTriShape& shape,
                                     fracX,
                                     fracY,
                                     smoothness,
-                                    overshoot);
+                                    maxRise);
         }
     }
 
@@ -323,15 +323,12 @@ auto TerrainSubdivision::gridHeight(const std::array<std::array<float,
 auto TerrainSubdivision::limitedTangent(float prev,
                                         float knot,
                                         float next,
-                                        float overshoot) -> float
+                                        float rise) -> float
 {
     constexpr float TANGENT_SCALE = 0.5F; /**< central-difference tangent weight */
 
     // Catmull-Rom's own tangent: the central difference of the knot's two neighbors
     const float raw = (next - prev) * TANGENT_SCALE;
-    if (overshoot >= 1.0F) {
-        return raw;
-    }
 
     // Only an upward excursion can push terrain into a static mesh the vanilla surface passed
     // under, and each sign of the tangent lifts the curve on one side of the knot only: in the
@@ -345,16 +342,25 @@ auto TerrainSubdivision::limitedTangent(float prev,
     // Both bounds collapse to zero at a crest (heights rise into the knot and fall back out of
     // it), which is the case behind the reported artifact: a span of hidden garbage heights
     // under a mesh covering the landscape reads as a flat run with a drop at each end, and the
-    // unlimited curve bulges that whole span up through the mesh.
+    // unlimited curve bulges that whole span up through the mesh. In a dip they go the other
+    // way and leave the raw tangent alone, so valley floors and the gentle side of a step stay
+    // as round as unlimited Catmull-Rom draws them - dropping below the vanilla surface cannot
+    // poke through anything resting above it.
     //
-    // In a dip the bounds go the other way and leave the raw tangent untouched, so valley floors
-    // and the gentle side of a step stay as round as unlimited Catmull-Rom draws them - dropping
-    // below the vanilla surface cannot poke through anything resting above it.
+    // Both bounds are then loosened by the caller's rise allowance, which is what lets a crest
+    // round over at all. Its conversion into a tangent is exact: the two Hermite tangent bases
+    // peak at 4/27, and both tangents of a segment can be pushing it up at once, so letting each
+    // exceed its bound by s raises the curve by at most (8 / 27) * s. K_RISE_TO_TANGENT inverts
+    // that, so a slack of K_RISE_TO_TANGENT * rise buys exactly `rise` world units of height and
+    // no more. Being an absolute allowance rather than a fraction of the local relief is what
+    // makes it useful: a gentle crest asks for only a few units of tangent and is left alone
+    // entirely, while a cliff edge is still cut hard, which is the one that would have poked.
     constexpr float MONOTONE_LIMIT = 3.0F;
-    const float upper = MONOTONE_LIMIT * std::max(0.0F, next - knot);
-    const float lower = MONOTONE_LIMIT * std::min(0.0F, knot - prev);
+    const float slack = K_RISE_TO_TANGENT * rise;
+    const float upper = (MONOTONE_LIMIT * std::max(0.0F, next - knot)) + slack;
+    const float lower = (MONOTONE_LIMIT * std::min(0.0F, knot - prev)) - slack;
 
-    return lerp(std::clamp(raw, lower, upper), raw, overshoot);
+    return std::clamp(raw, lower, upper);
 }
 
 auto TerrainSubdivision::catmullRom(float p0,
@@ -362,7 +368,7 @@ auto TerrainSubdivision::catmullRom(float p0,
                                     float p2,
                                     float p3,
                                     float t,
-                                    float overshoot) -> float
+                                    float rise) -> float
 {
     // Catmull-Rom in Hermite form: the cubic through p1 (t=0) and p2 (t=1) whose end tangents
     // come from the neighboring points. Both segments meeting at a knot derive the same tangent
@@ -370,8 +376,8 @@ auto TerrainSubdivision::catmullRom(float p0,
     constexpr float BASIS_TWO = 2.0F; /**< Hermite basis coefficient */
     constexpr float BASIS_THREE = 3.0F; /**< Hermite basis coefficient */
 
-    const float tangent1 = limitedTangent(p0, p1, p2, overshoot);
-    const float tangent2 = limitedTangent(p1, p2, p3, overshoot);
+    const float tangent1 = limitedTangent(p0, p1, p2, rise);
+    const float tangent2 = limitedTangent(p1, p2, p3, rise);
     const float tSq = t * t;
     const float tCu = tSq * t;
 
@@ -407,8 +413,12 @@ auto TerrainSubdivision::sampleHeight(const std::array<std::array<float,
                                       float fracX,
                                       float fracY,
                                       float smoothness,
-                                      float overshoot) -> float
+                                      float maxRise) -> float
 {
+    // The two passes below each get half the allowance, so a vert that both of them lift ends
+    // up at most maxRise above the four original verts around it - the figure the INI names
+    const float risePerPass = maxRise * K_HALF;
+
     // Exact grid point: return the stored height untouched
     if (fracX == 0.0F && fracY == 0.0F) {
         return gridHeight(grid, cellX, cellY);
@@ -428,13 +438,13 @@ auto TerrainSubdivision::sampleHeight(const std::array<std::array<float,
                                                                        gridHeight(grid, cellX + 1, sampleY),
                                                                        gridHeight(grid, cellX + 2, sampleY),
                                                                        fracX,
-                                                                       overshoot);
+                                                                       risePerPass);
         }
     }
-    // Each row already sits within the range of its own two bracketing grid samples, so bounding
-    // this pass the same way confines the result to the range of the four verts around it
+    // Each row already sits at most risePerPass above its own two bracketing grid samples, so
+    // bounding this pass the same way puts the result within maxRise of the four verts around it
     const float smooth
-        = fracY == 0.0F ? rows.at(1) : catmullRom(rows.at(0), rows.at(1), rows.at(2), rows.at(3), fracY, overshoot);
+        = fracY == 0.0F ? rows.at(1) : catmullRom(rows.at(0), rows.at(1), rows.at(2), rows.at(3), fracY, risePerPass);
 
     if (smoothness >= 1.0F) {
         return smooth;

@@ -23,10 +23,10 @@ namespace SmoothTerrain {
  * Heights follow a Catmull-Rom spline over the whole cell - the original verts act as fixed
  * knots and both sides of every knot share one tangent, so the faceted creases of the vanilla
  * mesh disappear. The spline's tangents are limited against upward overshoot (see
- * limitedTangent), which holds every new vertex at or below the highest original vert around it
- * and so keeps the subdivided mesh out of static meshes the vanilla surface passed under; dips
- * are left unbounded. Every other attribute is bilinear. Materials, collision, multibounds and
- * the
+ * limitedTangent), which holds every new vertex within a fixed number of world units of the
+ * highest original vert around it and so keeps the subdivided mesh out of static meshes the
+ * vanilla surface passed under; dips are left unbounded. Every other attribute is bilinear.
+ * Materials, collision, multibounds and the
  * scene graph are untouched, so the change is invisible to other plugins - only the mesh
  * density changes.
  *
@@ -82,6 +82,8 @@ private:
     constexpr static float K_HALF = 0.5F; /**< Midpoints, nearest-corner splits and the (v + 1) / 2 encoding */
     constexpr static float K_BYTE_MAX = 255.0F; /**< Upper clamp when rounding an interpolated byte attribute */
     constexpr static float K_UNIT_BYTE_SCALE = 127.5F; /**< The engine's (v + 1) * 127.5 byte encoding of [-1, 1] */
+    constexpr static float K_RISE_TO_TANGENT
+        = 27.0F / 8.0F; /**< World units of allowed rise -> tangent slack (see limitedTangent) */
 
     //
     // IEEE 754 binary16 (half) and binary32 (float) field layouts, shared by halfToFloat and
@@ -231,8 +233,8 @@ private:
      * @param fracX Fractional position within the coarse quad [0, 1)
      * @param fracY Fractional position within the coarse quad [0, 1)
      * @param smoothness 0 = bilinear only, 1 = full Catmull-Rom
-     * @param overshoot 0 = height held at or below the highest of the four surrounding verts,
-     *        1 = unlimited (dips are never bounded either way)
+     * @param maxRise World units the height may rise above the highest of the four surrounding
+     *        verts; split evenly between the two interpolation passes (dips are never bounded)
      * @return float The interpolated height
      */
     static auto sampleHeight(const std::array<std::array<float,
@@ -243,22 +245,22 @@ private:
                              float fracX,
                              float fracY,
                              float smoothness,
-                             float overshoot) -> float;
+                             float maxRise) -> float;
 
     /**
      * @brief 1D Catmull-Rom through p1 (t=0) and p2 (t=1)
      *
-     * @param overshoot Passed to limitedTangent; at 0 the segment cannot leave [p1, p2]
+     * @param rise Passed to limitedTangent; the segment cannot exceed max(p1, p2) by more
      */
     static auto catmullRom(float p0,
                            float p1,
                            float p2,
                            float p3,
                            float t,
-                           float overshoot) -> float;
+                           float rise) -> float;
 
     /**
-     * @brief The spline tangent at one knot, optionally limited against upward overshoot
+     * @brief The spline tangent at one knot, limited against upward overshoot
      *
      * Raw Catmull-Rom uses the central difference of the knot's neighbors, which lets the curve
      * swing past the knots wherever the sampled heights turn or step sharply. Swinging upward is
@@ -275,17 +277,23 @@ private:
      * C1 at the original verts, and on terrain that varies smoothly they are slack enough that
      * the tangent comes back unchanged.
      *
+     * The allowance is in world units rather than a fraction of the local relief, which is what
+     * keeps it useful across the whole landscape: the height a static clears the terrain by does
+     * not scale with how dramatic that terrain is, so neither should the budget. A gentle crest
+     * asks for only a few units of tangent and passes through untouched, while a cliff edge -
+     * the shape that actually pokes - is still cut back hard.
+     *
      * @param prev Height at the previous knot
      * @param knot Height at this knot
      * @param next Height at the next knot
-     * @param overshoot 0 fully limits the tangent, 1 returns the raw central difference,
-     *        values between blend the two
+     * @param rise World units the curve may rise past the knots of either adjoining segment;
+     *        0 pins it to them exactly
      * @return float The tangent to use at this knot
      */
     static auto limitedTangent(float prev,
                                float knot,
                                float next,
-                               float overshoot) -> float;
+                               float rise) -> float;
 
     /**
      * @brief Linear interpolation
