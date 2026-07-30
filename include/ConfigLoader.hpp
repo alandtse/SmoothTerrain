@@ -19,6 +19,7 @@ private:
     //
     constexpr static float DEFAULT_SUBDIVISIONS = 1.0F; /**< Default subdivision level (iSubdivisions) */
     constexpr static float DEFAULT_SMOOTHNESS = 1.0F; /**< Default interpolation smoothness (fSmoothness) */
+    constexpr static float DEFAULT_OVERSHOOT = 0.0F; /**< Default spline overshoot allowance (fOvershoot) */
 
 public:
     constexpr static int MAX_SUBDIVISIONS = 3; /**< Hard cap: level 4 would overflow BSTriShape's 16-bit vertex count
@@ -31,6 +32,7 @@ private:
     struct ConfigMap {
         int subdivisions {}; /**< How many times each 128-unit land quad is split in half per axis (0-3) */
         float smoothness {}; /**< 0 = flat bilinear interpolation, 1 = full Catmull-Rom smoothing */
+        float overshoot {}; /**< 0 = curve held at or below the surrounding verts, 1 = unlimited Catmull-Rom */
     };
 
     static inline ConfigMap s_config; /**< Holds the current configuration values for the plugin */
@@ -60,6 +62,22 @@ public:
      *         Catmull-Rom curvature between the original verts
      */
     static auto getSmoothness() -> float;
+
+    /**
+     * @brief Get how far the height spline may rise past the original verts
+     *
+     * A Catmull-Rom curve normally overshoots past its knots wherever the sampled heights turn
+     * or step sharply. Overshooting upward is what lets the new terrain rise into space every
+     * surrounding original vertex was below - the space a static mesh resting on the vanilla
+     * surface occupies. Limiting it holds each interpolated height at or below the highest of
+     * the four original verts around it, so the subdivided mesh cannot poke through a static
+     * the vanilla mesh cleared. Downward overshoot is never limited, since a dip cannot reach
+     * anything resting above the surface.
+     *
+     * @return float 0 holds the curve at or below the surrounding verts, 1 leaves the raw
+     *         Catmull-Rom tangents untouched, values between scale the allowance
+     */
+    static auto getOvershoot() -> float;
 
 private:
     /**

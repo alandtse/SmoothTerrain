@@ -181,6 +181,7 @@ auto TerrainSubdivision::subdivide(RE::BSTriShape& shape,
     const float step = K_COARSE_STEP / static_cast<float>(sub);
 
     const float smoothness = ConfigLoader::getSmoothness();
+    const float overshoot = ConfigLoader::getOvershoot();
 
     std::vector<LandVertex> fine(fineVerts);
     for (std::uint32_t j = 0; j < fineDim; ++j) {
@@ -216,7 +217,8 @@ auto TerrainSubdivision::subdivide(RE::BSTriShape& shape,
                                     gridBaseY + static_cast<int>(coarseY),
                                     fracX,
                                     fracY,
-                                    smoothness);
+                                    smoothness,
+                                    overshoot);
         }
     }
 
@@ -318,22 +320,58 @@ auto TerrainSubdivision::gridHeight(const std::array<std::array<float,
     return grid.at(static_cast<std::size_t>(y)).at(static_cast<std::size_t>(x));
 }
 
+auto TerrainSubdivision::limitedTangent(float prev,
+                                        float knot,
+                                        float next,
+                                        float overshoot) -> float
+{
+    constexpr float TANGENT_SCALE = 0.5F; /**< central-difference tangent weight */
+
+    // Catmull-Rom's own tangent: the central difference of the knot's two neighbors
+    const float raw = (next - prev) * TANGENT_SCALE;
+    if (overshoot >= 1.0F) {
+        return raw;
+    }
+
+    // Only an upward excursion can push terrain into a static mesh the vanilla surface passed
+    // under, and each sign of the tangent lifts the curve on one side of the knot only: in the
+    // Hermite basis the tangent's weight is t * (t - 1)^2 on the segment ahead of the knot,
+    // which is never negative, and t^3 - t^2 on the segment behind it, which is never positive.
+    // So a positive tangent can only lift the curve ahead of the knot and a negative one only
+    // behind it, which lets each direction be bounded on its own against the secant it would be
+    // lifting over. Fritsch-Carlson's factor of three is exactly the steepest a tangent can be
+    // without carrying the curve past the far knot of that segment.
+    //
+    // Both bounds collapse to zero at a crest (heights rise into the knot and fall back out of
+    // it), which is the case behind the reported artifact: a span of hidden garbage heights
+    // under a mesh covering the landscape reads as a flat run with a drop at each end, and the
+    // unlimited curve bulges that whole span up through the mesh.
+    //
+    // In a dip the bounds go the other way and leave the raw tangent untouched, so valley floors
+    // and the gentle side of a step stay as round as unlimited Catmull-Rom draws them - dropping
+    // below the vanilla surface cannot poke through anything resting above it.
+    constexpr float MONOTONE_LIMIT = 3.0F;
+    const float upper = MONOTONE_LIMIT * std::max(0.0F, next - knot);
+    const float lower = MONOTONE_LIMIT * std::min(0.0F, knot - prev);
+
+    return lerp(std::clamp(raw, lower, upper), raw, overshoot);
+}
+
 auto TerrainSubdivision::catmullRom(float p0,
                                     float p1,
                                     float p2,
                                     float p3,
-                                    float t) -> float
+                                    float t,
+                                    float overshoot) -> float
 {
-    // Catmull-Rom in Hermite form: the cubic through p1 (t=0) and p2 (t=1) whose end tangents are
-    // the central differences of the neighboring points. Both segments meeting at a knot derive
-    // the same tangent there, which is what removes the vanilla mesh's creases at the original
-    // verts.
-    constexpr float TANGENT_SCALE = 0.5F; /**< central-difference tangent weight */
+    // Catmull-Rom in Hermite form: the cubic through p1 (t=0) and p2 (t=1) whose end tangents
+    // come from the neighboring points. Both segments meeting at a knot derive the same tangent
+    // there, which is what removes the vanilla mesh's creases at the original verts.
     constexpr float BASIS_TWO = 2.0F; /**< Hermite basis coefficient */
     constexpr float BASIS_THREE = 3.0F; /**< Hermite basis coefficient */
 
-    const float tangent1 = (p2 - p0) * TANGENT_SCALE;
-    const float tangent2 = (p3 - p1) * TANGENT_SCALE;
+    const float tangent1 = limitedTangent(p0, p1, p2, overshoot);
+    const float tangent2 = limitedTangent(p1, p2, p3, overshoot);
     const float tSq = t * t;
     const float tCu = tSq * t;
 
@@ -368,7 +406,8 @@ auto TerrainSubdivision::sampleHeight(const std::array<std::array<float,
                                       int cellY,
                                       float fracX,
                                       float fracY,
-                                      float smoothness) -> float
+                                      float smoothness,
+                                      float overshoot) -> float
 {
     // Exact grid point: return the stored height untouched
     if (fracX == 0.0F && fracY == 0.0F) {
@@ -388,10 +427,14 @@ auto TerrainSubdivision::sampleHeight(const std::array<std::array<float,
                                                                        gridHeight(grid, cellX, sampleY),
                                                                        gridHeight(grid, cellX + 1, sampleY),
                                                                        gridHeight(grid, cellX + 2, sampleY),
-                                                                       fracX);
+                                                                       fracX,
+                                                                       overshoot);
         }
     }
-    const float smooth = fracY == 0.0F ? rows.at(1) : catmullRom(rows.at(0), rows.at(1), rows.at(2), rows.at(3), fracY);
+    // Each row already sits within the range of its own two bracketing grid samples, so bounding
+    // this pass the same way confines the result to the range of the four verts around it
+    const float smooth
+        = fracY == 0.0F ? rows.at(1) : catmullRom(rows.at(0), rows.at(1), rows.at(2), rows.at(3), fracY, overshoot);
 
     if (smoothness >= 1.0F) {
         return smooth;
