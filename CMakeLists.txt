@@ -19,13 +19,12 @@ add_compile_definitions(PLUGIN_NAME="${PLUGIN_NAME}")
 add_compile_definitions(PLUGIN_VERSION="${PLUGIN_VERSION}")
 
 # CommonLibSSE-NG resolves game addresses and struct layouts at runtime, so one DLL serves
-# every supported runtime. SE and AE are both enabled; VR is off because the landscape
-# pipeline offsets have only been reverse engineered for the flat runtimes (see
-# include/Offsets.hpp) and VR needs its own address set.
+# every supported runtime. SE, AE, and VR are all enabled; the landscape pipeline offsets
+# have been reverse engineered for all three (see include/Offsets.hpp).
 set(BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(ENABLE_SKYRIM_SE ON CACHE BOOL "" FORCE)
 set(ENABLE_SKYRIM_AE ON CACHE BOOL "" FORCE)
-set(ENABLE_SKYRIM_VR OFF CACHE BOOL "" FORCE)
+set(ENABLE_SKYRIM_VR ON CACHE BOOL "" FORCE)
 add_subdirectory("extern/CommonLibSSE-NG" commonlibsse)
 
 set(headers
