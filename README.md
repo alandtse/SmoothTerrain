@@ -2,6 +2,8 @@
 
 An SKSE plugin that subdivides Skyrim's landscape meshes at the engine level for smoother terrain.
 
+Supports Skyrim SE, AE, and VR with a single DLL.
+
 ## Contributing
 
 Contributors are welcome. You can build the project by running the `buildRelease.ps1` powershell

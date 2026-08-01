@@ -28,7 +28,8 @@ void DecalFix::install()
 
     // Two entry points reach the collector: the decal's own Initialize, and a helper that
     // resolves the target's geometry first and tail jumps into it. Scan windows generously
-    // cover each of them on both flavors (0xDC9 / 0x2D on 1.6.1170, 0x9E6 / 0x2D on 1.5.97).
+    // cover each of them on all three flavors (0xDC9 / 0x2D on 1.6.1170, 0x9E6 / 0x2D on
+    // 1.5.97, 0xA05 / 0x2D on VR).
     struct CallerSpec {
         REL::RelocationID id;
         std::size_t window {};
