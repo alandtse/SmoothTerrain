@@ -7,7 +7,7 @@ if(POLICY CMP0091)
 endif()
 
 set(PLUGIN_NAME "SmoothTerrain")
-set(PLUGIN_VERSION "0.2.0")
+set(PLUGIN_VERSION "0.3.0")
 project(${PLUGIN_NAME} VERSION ${PLUGIN_VERSION} LANGUAGES CXX)
 
 if(MSVC)
