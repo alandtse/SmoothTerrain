@@ -24,11 +24,11 @@ using namespace SmoothTerrain;
 
 void TerrainSubdivision::install()
 {
-    // One DLL loads on every runtime, but only SE's and AE's landscape offsets are verified;
-    // hooking an unverified runtime would call into an unrelated function (see Offsets.hpp)
+    // One DLL loads on every runtime, but only SE's, AE's, and VR's landscape offsets are
+    // verified; hooking an unverified runtime would call into an unrelated function (see Offsets.hpp)
     if (!Offsets::isRuntimeSupported()) {
-        spdlog::warn("Terrain subdivision is only supported on Skyrim SE (1.5.x) and AE (1.6.x); "
-                     "the landscape offsets for this runtime have not been reverse engineered. "
+        spdlog::warn("Terrain subdivision is only supported on Skyrim SE (1.5.x), AE (1.6.x), and VR "
+                     "(1.4.15); the landscape offsets for this runtime have not been reverse engineered. "
                      "The plugin stays loaded but installs no hooks, and terrain renders as vanilla.");
         return;
     }
@@ -52,16 +52,17 @@ void TerrainSubdivision::install()
         bool callsBuilderDirectly {}; /**< False where this runtime's caller delegates to another entry below */
     };
     const std::array<CallerSpec, 2> callers {
-        // AE's geometry init calls the builder itself; SE's calls the quad build helper below
-        // instead, so on SE that helper's single call site already covers the init path too.
+        // AE's geometry init calls the builder itself; SE's and VR's call the quad build helper
+        // below instead, so on those flavors that helper's single call site already covers the
+        // init path too.
         CallerSpec {.id = Offsets::K_BUILD_LAND_GEOMETRY,
-                    .window = 0x800, // 0x5CC on 1.6.1170
+                    .window = 0x800, // 0x5CC on 1.6.1170, 0x4A5 on 1.5.97 and VR
                     .name = "land geometry init",
                     .callsBuilderDirectly = REL::Module::IsAE()},
         // Scan windows generously cover each caller's body without reaching the next function
         // that also calls the builder.
         CallerSpec {.id = Offsets::K_BUILD_LAND_QUADS,
-                    .window = 0x200, // 0x126 on 1.6.1170, 0x117 on 1.5.97
+                    .window = 0x200, // 0x126 on 1.6.1170, 0x117 on 1.5.97 and VR
                     .name = "land quad build",
                     .callsBuilderDirectly = true},
     };
