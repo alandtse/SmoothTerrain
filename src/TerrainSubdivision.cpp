@@ -3,6 +3,7 @@
 #include "ConfigLoader.hpp"
 #include "HookUtil.hpp"
 #include "Offsets.hpp"
+#include "TerrainFalloff.hpp"
 
 #include "PCH.h"
 
@@ -15,7 +16,9 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <utility>
 #include <vector>
@@ -115,50 +118,65 @@ auto TerrainSubdivision::BuildQuadHook::thunk(RE::TESObjectLAND::LoadedLandData*
     // Vanilla builds the 17x17 quad first (through any detours other mods put on it)
     auto* shape = s_func(data, quad);
 
-    const int level = ConfigLoader::getSubdivisions();
-    if (shape == nullptr || data == nullptr || quad >= 4 || level <= 0) {
+    if (shape == nullptr || data == nullptr || quad >= 4 || ConfigLoader::getSubdivisions() <= 0) {
         return shape;
     }
 
-    if (!subdivide(*shape, *data, quad, level)) {
-        // Anything unexpected leaves the vanilla mesh in place; log at debug to avoid spam
-        spdlog::debug("Quad {} kept its vanilla land mesh", quad);
+    // Every quad starts out vanilla, always: subdividing here would put full mesh generation
+    // and a GPU upload inside the engine's cell loading, 16 times per cell - the load-time
+    // hitch this plugin is structured to avoid. TerrainFalloff installs the smoothed mesh
+    // from the main thread later, built in the background.
+    if (TerrainFalloff::isEnabled()) {
+        TerrainFalloff::registerQuad(shape, quad);
     }
     return shape;
 }
 
-auto TerrainSubdivision::subdivide(RE::BSTriShape& shape,
-                                   const RE::TESObjectLAND::LoadedLandData& data,
-                                   std::uint32_t quad,
-                                   int level) -> bool
+auto TerrainSubdivision::validateQuadLayout(RE::BSTriShape& shape) -> std::optional<std::uint64_t>
 {
     // The vanilla CPU-side vertex copy is the interpolation source for every attribute.
     // Geometry members live behind CommonLibSSE-NG's runtime accessors so their per-runtime
     // offsets resolve correctly.
     auto& geometryData = shape.GetGeometryRuntimeData();
     auto& triShapeData = shape.GetTrishapeRuntimeData();
-    auto* const oldData = geometryData.rendererData;
-    if ((oldData == nullptr) || (oldData->rawVertexData == nullptr)) {
-        return false;
+    auto* const rendererData = geometryData.rendererData;
+    if ((rendererData == nullptr) || (rendererData->rawVertexData == nullptr)) {
+        return std::nullopt;
     }
 
     // Only touch exactly the mesh the vanilla builder makes; any other layout means another
     // mod got here first (or the pipeline changed) and vanilla is the safe outcome
     if (triShapeData.vertexCount != K_COARSE_VERTS || triShapeData.triangleCount != K_COARSE_TRIS) {
-        return false;
+        return std::nullopt;
     }
     const auto desc = std::bit_cast<std::uint64_t>(geometryData.vertexDesc);
     constexpr std::uint64_t DESC_STRIDE_MASK = 0xF; // the desc's low nibble holds the stride in dwords
     if ((desc & DESC_STRIDE_MASK) * sizeof(std::uint32_t) != sizeof(LandVertex)) {
-        return false;
+        return std::nullopt;
     }
+    return desc;
+}
 
-    // Copy the vanilla records into a bounds-checked array; they are the interpolation source for
-    // every attribute, and the original verts are re-emitted from it verbatim
-    std::array<LandVertex, K_COARSE_VERTS> coarse {};
-    std::memcpy(coarse.data(), oldData->rawVertexData, sizeof(coarse));
+auto TerrainSubdivision::snapshotQuad(const RE::TESObjectLAND::LoadedLandData& data,
+                                      const void* rawVertexData,
+                                      std::uint32_t quad,
+                                      std::uint64_t vertexDesc) -> std::shared_ptr<const QuadSnapshot>
+{
+    // Copy everything a build needs out of the engine structures; the snapshot must stay
+    // usable after the cell unloads or the shape changes hands (see the header)
+    auto snapshot = std::make_shared<QuadSnapshot>();
+    std::memcpy(snapshot->coarse.data(), rawVertexData, sizeof(snapshot->coarse));
+    buildCellHeightGrid(data, snapshot->heights);
+    snapshot->quad = quad;
+    snapshot->vertexDesc = vertexDesc;
+    return snapshot;
+}
 
-    const auto sub = static_cast<std::uint32_t>(1U << level); // segments per coarse quad edge
+auto TerrainSubdivision::buildSmoothedMesh(const QuadSnapshot& snapshot,
+                                           int level,
+                                           const EdgeLevels& edgeLevels) -> std::optional<MeshBuffers>
+{
+    const auto sub = static_cast<std::uint32_t>(1U << static_cast<unsigned>(level)); // segments per coarse quad edge
     const std::uint32_t fineDim = ((K_COARSE_DIM - 1) * sub) + 1;
     const std::uint32_t fineVerts = fineDim * fineDim;
     const std::uint32_t fineTris = (fineDim - 1) * (fineDim - 1) * 2;
@@ -167,21 +185,19 @@ auto TerrainSubdivision::subdivide(RE::BSTriShape& shape,
     static_assert(MAX_FINE_DIM * MAX_FINE_DIM <= std::numeric_limits<std::uint16_t>::max(),
                   "the maximum subdivision level must stay within 16-bit vertex indices");
 
-    // Heights come from the full 33x33 cell so quad seams share identical samples
-    std::array<std::array<float, K_CELL_DIM>, K_CELL_DIM> grid {};
-    buildCellHeightGrid(data, grid);
+    const auto& coarse = snapshot.coarse;
+    const auto& grid = snapshot.heights;
 
     // Quadrant placement in mesh-local space and within the cell grid (0 = SW, 1 = SE,
     // 2 = NW, 3 = NE; matches the vanilla builder's offset tables)
-    const std::uint32_t quadX = quad & 1U;
-    const std::uint32_t quadY = quad >> 1U;
+    const std::uint32_t quadX = snapshot.quad & 1U;
+    const std::uint32_t quadY = snapshot.quad >> 1U;
     const float baseX = (static_cast<float>(quadX) * K_QUAD_SIZE) - K_QUAD_SIZE;
     const float baseY = (static_cast<float>(quadY) * K_QUAD_SIZE) - K_QUAD_SIZE;
     const auto gridBaseX = static_cast<int>(quadX * (K_COARSE_DIM - 1));
     const auto gridBaseY = static_cast<int>(quadY * (K_COARSE_DIM - 1));
     const float step = K_COARSE_STEP / static_cast<float>(sub);
 
-    const float smoothness = ConfigLoader::getSmoothness();
     const float maxRise = ConfigLoader::getMaxRise();
 
     std::vector<LandVertex> fine(fineVerts);
@@ -213,13 +229,59 @@ auto TerrainSubdivision::subdivide(RE::BSTriShape& shape,
 
             out.posX = baseX + (static_cast<float>(i) * step);
             out.posY = baseY + (static_cast<float>(j) * step);
-            out.posZ = sampleHeight(grid,
-                                    gridBaseX + static_cast<int>(coarseX),
-                                    gridBaseY + static_cast<int>(coarseY),
-                                    fracX,
-                                    fracY,
-                                    smoothness,
-                                    maxRise);
+
+            // A vertex on one of this quad's border lines renders at that line's level (see
+            // EdgeLevels). At the build level that is the plain spline; anything lower pins
+            // the vertex onto the coarser neighbor's edge polyline so the two meshes meet
+            // without a crack - whether the line is a cell border or the cell's interior
+            // cross line. Only the height changes; the bilinear attributes above already
+            // collapse to the shared edge records and are the same linear function of
+            // position on both sides. A vertex cannot sit on two constrained lines at once -
+            // that would need fracX == fracY == 0, the original-vert case handled above.
+            const int gx = gridBaseX + static_cast<int>(coarseX);
+            const int gy = gridBaseY + static_cast<int>(coarseY);
+            int lineLevel = level;
+            bool alongY = false;
+            if (fracX == 0.0F) {
+                alongY = true;
+                if (gx == gridBaseX) {
+                    lineLevel = edgeLevels.west;
+                } else if (gx == gridBaseX + static_cast<int>(K_COARSE_DIM) - 1) {
+                    lineLevel = edgeLevels.east;
+                }
+            } else if (fracY == 0.0F) {
+                if (gy == gridBaseY) {
+                    lineLevel = edgeLevels.south;
+                } else if (gy == gridBaseY + static_cast<int>(K_COARSE_DIM) - 1) {
+                    lineLevel = edgeLevels.north;
+                }
+            }
+
+            if (lineLevel >= level) {
+                out.posZ = sampleHeight(grid, gx, gy, fracX, fracY, maxRise);
+                continue;
+            }
+
+            // Pin onto the segment between the two bracketing vertices the coarser side owns.
+            // Its vertices along the shared line are spline samples at its own step; sampling
+            // them here with the same sampleHeight collapse (one fraction always zero, so only
+            // the shared line's heights contribute) reproduces the neighbor's floats bit for
+            // bit, and everything in between lands on its straight segments. Level 0
+            // degenerates to the vanilla edge: samples at whole grid points are the original
+            // LAND heights. All positions are dyadic (k / 2^level), so the arithmetic below is
+            // exact in float and truncation is floor (along >= 0).
+            const auto lineSteps = 1U << static_cast<unsigned>(lineLevel); // verts per coarse cell on that side
+            const float along = alongY ? (static_cast<float>(gy) + fracY) : (static_cast<float>(gx) + fracX);
+            const float scaled = along * static_cast<float>(lineSteps);
+            const auto low = static_cast<std::uint32_t>(scaled);
+            const float lineFrac = scaled - static_cast<float>(low);
+            const auto lineSample = [&](std::uint32_t index) -> float {
+                const auto lineCell = static_cast<int>(index / lineSteps);
+                const float lineCellFrac = static_cast<float>(index % lineSteps) / static_cast<float>(lineSteps);
+                return alongY ? sampleHeight(grid, gx, lineCell, 0.0F, lineCellFrac, maxRise)
+                              : sampleHeight(grid, lineCell, gy, lineCellFrac, 0.0F, maxRise);
+            };
+            out.posZ = lerp(lineSample(low), lineSample(low + 1), lineFrac);
         }
     }
 
@@ -246,30 +308,54 @@ auto TerrainSubdivision::subdivide(RE::BSTriShape& shape,
         radiusSq = std::max(radiusSq, delta.SqrLength());
     }
 
-    // All-or-nothing swap: create everything first, only then touch the shape
     auto* const indexBuffer = getIndexBuffer(level);
     if (indexBuffer == nullptr) {
-        return false;
+        return std::nullopt;
     }
     auto* const renderer = RE::BSGraphics::Renderer::GetSingleton();
     if (renderer == nullptr) {
-        return false;
+        return std::nullopt;
     }
     static const REL::Relocation<Offsets::CreateTriShapeData_t> createTriShapeData {Offsets::K_CREATE_TRISHAPE_DATA};
-    auto* const newData = createTriShapeData(renderer, fine.data(), fineVerts * sizeof(LandVertex), desc, indexBuffer);
+    auto* const newData
+        = createTriShapeData(renderer, fine.data(), fineVerts * sizeof(LandVertex), snapshot.vertexDesc, indexBuffer);
     if (newData == nullptr) {
-        return false;
+        return std::nullopt;
     }
 
-    releaseRendererData(oldData);
-    geometryData.rendererData = newData;
-    triShapeData.triangleCount = static_cast<std::uint16_t>(fineTris);
-    triShapeData.vertexCount = static_cast<std::uint16_t>(fineVerts);
-    auto& modelBound = shape.GetModelData().modelBound;
-    modelBound.center = center;
-    modelBound.radius = std::sqrt(radiusSq);
-    return true;
+    return MeshBuffers {.rendererData = newData,
+                        .vertexCount = fineVerts,
+                        .triangleCount = fineTris,
+                        .boundCenter = center,
+                        .boundRadius = std::sqrt(radiusSq)};
 }
+
+auto TerrainSubdivision::currentMesh(RE::BSTriShape& shape) -> MeshBuffers
+{
+    auto& geometryData = shape.GetGeometryRuntimeData();
+    auto& triShapeData = shape.GetTrishapeRuntimeData();
+    const auto& modelBound = shape.GetModelData().modelBound;
+    return MeshBuffers {.rendererData = geometryData.rendererData,
+                        .vertexCount = triShapeData.vertexCount,
+                        .triangleCount = triShapeData.triangleCount,
+                        .boundCenter = modelBound.center,
+                        .boundRadius = modelBound.radius};
+}
+
+void TerrainSubdivision::setMesh(RE::BSTriShape& shape,
+                                 const MeshBuffers& mesh)
+{
+    auto& geometryData = shape.GetGeometryRuntimeData();
+    auto& triShapeData = shape.GetTrishapeRuntimeData();
+    geometryData.rendererData = mesh.rendererData;
+    triShapeData.vertexCount = static_cast<std::uint16_t>(mesh.vertexCount);
+    triShapeData.triangleCount = static_cast<std::uint16_t>(mesh.triangleCount);
+    auto& modelBound = shape.GetModelData().modelBound;
+    modelBound.center = mesh.boundCenter;
+    modelBound.radius = mesh.boundRadius;
+}
+
+void TerrainSubdivision::releaseMesh(const MeshBuffers& mesh) { releaseRendererData(mesh.rendererData); }
 
 void TerrainSubdivision::buildCellHeightGrid(const RE::TESObjectLAND::LoadedLandData& data,
                                              std::array<std::array<float,
@@ -413,7 +499,6 @@ auto TerrainSubdivision::sampleHeight(const std::array<std::array<float,
                                       int cellY,
                                       float fracX,
                                       float fracY,
-                                      float smoothness,
                                       float maxRise) -> float
 {
     // The two passes below each get half the allowance, so a vert that both of them lift ends
@@ -444,21 +529,7 @@ auto TerrainSubdivision::sampleHeight(const std::array<std::array<float,
     }
     // Each row already sits at most risePerPass above its own two bracketing grid samples, so
     // bounding this pass the same way puts the result within maxRise of the four verts around it
-    const float smooth
-        = fracY == 0.0F ? rows.at(1) : catmullRom(rows.at(0), rows.at(1), rows.at(2), rows.at(3), fracY, risePerPass);
-
-    if (smoothness >= 1.0F) {
-        return smooth;
-    }
-
-    // Blend toward the flat (bilinear) surface; identical to vanilla shading at 0
-    const float flat = bilerp(gridHeight(grid, cellX, cellY),
-                              gridHeight(grid, cellX + 1, cellY),
-                              gridHeight(grid, cellX, cellY + 1),
-                              gridHeight(grid, cellX + 1, cellY + 1),
-                              fracX,
-                              fracY);
-    return lerp(flat, smooth, smoothness);
+    return fracY == 0.0F ? rows.at(1) : catmullRom(rows.at(0), rows.at(1), rows.at(2), rows.at(3), fracY, risePerPass);
 }
 
 auto TerrainSubdivision::lerpVertex(const LandVertex& c00,
