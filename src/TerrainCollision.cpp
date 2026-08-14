@@ -67,7 +67,7 @@ void TerrainCollision::install()
                  TerrainSubdivision::K_QUAD_WORLD_SIZE / static_cast<float>(dim - 1));
 }
 
-auto TerrainCollision::Refinement::fieldFor(const HeightFieldCInfo* cinfo) const
+auto TerrainCollision::Refinement::fieldFor(const RE::HeightFieldCInfo* cinfo) const
     -> const TerrainSubdivision::QuadHeightField*
 {
     if (cinfo == nullptr || cinfo->heights == nullptr) {
@@ -94,7 +94,7 @@ auto TerrainCollision::Refinement::fieldFor(const HeightFieldCInfo* cinfo) const
     return &quads.at(quad);
 }
 
-auto TerrainCollision::buildRefinement(const LandCollisionDesc* desc,
+auto TerrainCollision::buildRefinement(const RE::LandCollisionDesc* desc,
                                        Refinement& refinement) -> bool
 {
     const int level = ConfigLoader::getSubdivisions();
@@ -122,8 +122,8 @@ auto TerrainCollision::buildRefinement(const LandCollisionDesc* desc,
     return true;
 }
 
-auto TerrainCollision::BuildHook::thunk(void* cellMopp,
-                                        const LandCollisionDesc* desc) -> bool
+auto TerrainCollision::BuildHook::thunk(RE::CellMopp* cellMopp,
+                                        const RE::LandCollisionDesc* desc) -> bool
 {
     Refinement refinement;
     const Refinement* const previous = s_refinement;
@@ -140,7 +140,7 @@ auto TerrainCollision::BuildHook::thunk(void* cellMopp,
 }
 
 auto TerrainCollision::InitHook::thunk(void* shape,
-                                       HeightFieldCInfo* cinfo) -> std::uintptr_t
+                                       RE::HeightFieldCInfo* cinfo) -> std::uintptr_t
 {
     const Refinement* const refinement = s_refinement;
     const auto* const field = refinement != nullptr ? refinement->fieldFor(cinfo) : nullptr;

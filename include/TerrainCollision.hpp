@@ -4,6 +4,10 @@
 
 #include "PCH.h"
 
+#include "RE/C/CellMopp.h"
+#include "RE/H/HeightFieldCInfo.h"
+#include "RE/L/LandCollisionDesc.h"
+
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -59,64 +63,6 @@ public:
 
 private:
     /**
-     * @brief The engine's landscape collision descriptor
-     *
-     * Built on the stack by the land geometry init and handed to K_BUILD_LAND_COLLISION, which
-     * walks it into one height field per quadrant. Only heights, quadCount and gridDim are read
-     * here, the rest is documented to pin the layout down (verified identical on 1.5.97,
-     * 1.6.1170 and VR 1.4.15).
-     */
-    struct LandCollisionDesc {
-        const float* heights; /**< 00: &LoadedLandData::heights[0][0]; quadrant q starts 289 floats in */
-        float xSpacing; /**< 08: world units between grid columns (128) */
-        float heightScale; /**< 0C: world units per stored height unit (1) */
-        float ySpacing; /**< 10: world units between grid rows (128) */
-        std::uint32_t pad14; /**< 14 */
-        void** quadShapes; /**< 18: the quadrant render shapes the bodies are linked to */
-        std::uint32_t quadCount; /**< 20: 4 */
-        float baseHeight; /**< 24: the per-land height base the stored heights are relative to */
-        std::uint32_t gridDim; /**< 28: 17 */
-        std::uint32_t material; /**< 2C */
-        std::uint32_t filterInfo; /**< 30 */
-        std::uint32_t pad34; /**< 34 */
-    };
-    static_assert(sizeof(LandCollisionDesc) == 0x38);
-
-    /**
-     * @brief Construction info of one quadrant's sampled height field
-     *
-     * K_BUILD_LAND_COLLISION fills one of these per quadrant and passes it to
-     * K_INIT_HEIGHT_FIELD_SHAPE, which reads it and nothing else. Scales are in havok units
-     * (world units times bhkWorld::GetWorldScale()); heights are in the engine's stored height
-     * space and heightBias converts them to world Z.
-     */
-    struct HeightFieldCInfo {
-        std::uint64_t unk00; /**< 00 */
-        std::uint64_t unk08; /**< 08 */
-        float scaleX; /**< 10: havok units between grid columns */
-        float scaleY; /**< 14: havok units per stored height unit */
-        float scaleZ; /**< 18: havok units between grid rows */
-        float scaleW; /**< 1C */
-        std::int32_t xRes; /**< 20: samples along X (17) */
-        std::int32_t zRes; /**< 24: samples along Z (17) */
-        float minHeight; /**< 28: heightBias plus the lowest sample */
-        float maxHeight; /**< 2C: heightBias plus the highest sample */
-        std::uint8_t unk30; /**< 30 */
-        std::array<std::uint8_t, 15> pad31; /**< 31 */
-        const float* heights; /**< 40: the quadrant's grid, row major */
-        float heightBias; /**< 48: world Z of a stored height of zero */
-        std::uint32_t pad4C; /**< 4C */
-        bool unk50; /**< 50 */
-        std::array<std::uint8_t, 7> pad51; /**< 51 */
-    };
-    static_assert(offsetof(HeightFieldCInfo, scaleX) == 0x10);
-    static_assert(offsetof(HeightFieldCInfo, xRes) == 0x20);
-    static_assert(offsetof(HeightFieldCInfo, minHeight) == 0x28);
-    static_assert(offsetof(HeightFieldCInfo, heights) == 0x40);
-    static_assert(offsetof(HeightFieldCInfo, heightBias) == 0x48);
-    static_assert(sizeof(HeightFieldCInfo) == 0x58);
-
-    /**
      * @brief The subdivided height grids of one cell, alive for the duration of one collision build
      *
      * Lives on the outer hook's stack and is published to the inner hook through s_refinement.
@@ -139,7 +85,7 @@ private:
          * @return const TerrainSubdivision::QuadHeightField* The replacement, or nullptr to leave
          *         the build alone
          */
-        [[nodiscard]] auto fieldFor(const HeightFieldCInfo* cinfo) const
+        [[nodiscard]] auto fieldFor(const RE::HeightFieldCInfo* cinfo) const
             -> const TerrainSubdivision::QuadHeightField*;
     };
 
@@ -150,8 +96,8 @@ private:
      * four quadrants - and publishes them for the nested shape builds below.
      */
     struct BuildHook {
-        static auto thunk(void* cellMopp,
-                          const LandCollisionDesc* desc) -> bool;
+        static auto thunk(RE::CellMopp* cellMopp,
+                          const RE::LandCollisionDesc* desc) -> bool;
         static inline REL::Relocation<decltype(thunk)> s_func; /**< The unpatched builder */
     };
 
@@ -162,7 +108,7 @@ private:
      */
     struct InitHook {
         static auto thunk(void* shape,
-                          HeightFieldCInfo* cinfo) -> std::uintptr_t;
+                          RE::HeightFieldCInfo* cinfo) -> std::uintptr_t;
         static inline REL::Relocation<decltype(thunk)> s_func; /**< The unpatched init */
     };
 
@@ -175,7 +121,7 @@ private:
      *         layout, or a shape count / grid dimension this code was not written against), in
      *         which case the build stays vanilla
      */
-    [[nodiscard]] static auto buildRefinement(const LandCollisionDesc* desc,
+    [[nodiscard]] static auto buildRefinement(const RE::LandCollisionDesc* desc,
                                               Refinement& refinement) -> bool;
 
     /**
